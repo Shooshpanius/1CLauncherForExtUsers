@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="1CLauncher/1CLauncher.csproj" />
+  <Project Path="DCAuth/DCAuth.csproj" />
+</Solution>
