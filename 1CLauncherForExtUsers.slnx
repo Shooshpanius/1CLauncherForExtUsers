@@ -1,4 +1,8 @@
 <Solution>
+  <Folder Name="/Элементы решения/">
+    <File Path="LICENSE.txt" />
+    <File Path="README.md" />
+  </Folder>
   <Project Path="1CLauncher/1CLauncher.csproj" />
   <Project Path="DCAuth/DCAuth.csproj" />
 </Solution>
