@@ -422,7 +422,7 @@ namespace _1CLauncher.ViewModels
                             if (!versionDirPattern.IsMatch(folder))
                                 continue;
 
-                            var exeCandidates = new[] { Path.Combine(sub, "bin", "1cv8.exe"), Path.Combine(sub, "bin", "1cv8c.exe"), Path.Combine(sub, "1cv8.exe") };
+                            var exeCandidates = new[] { Path.Combine(sub, "bin", "1cv8c.exe"), Path.Combine(sub, "bin", "1cv8.exe"), Path.Combine(sub, "1cv8.exe") };
                             string? foundExe = null;
                             foreach (var c in exeCandidates)
                             {
@@ -442,7 +442,7 @@ namespace _1CLauncher.ViewModels
                 // fallback: scan program files for 1cv8.exe
                 if (!Platforms.Any())
                 {
-                    var patterns = new[] { "1cv8.exe", "1cv8c.exe", "1cv8s.exe" };
+                    var patterns = new[] { "1cv8c.exe", "1cv8.exe", "1cv8s.exe" };
                     foreach (var root in new[] { pf64, pf86 }.Distinct().Where(p => !string.IsNullOrWhiteSpace(p)))
                     {
                         if (!Directory.Exists(root)) continue;
