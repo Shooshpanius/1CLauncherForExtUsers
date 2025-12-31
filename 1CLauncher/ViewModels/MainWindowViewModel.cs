@@ -78,24 +78,49 @@ namespace _1CLauncher.ViewModels
                 {
                     try
                     {
-                        // Check common folders directly
+                        // Prefer searching under root\1cv8 and its subfolders (common install layout: 1cv8\<version>\bin\1cv8.exe)
                         var dir1 = Path.Combine(root, "1cv8");
                         if (Directory.Exists(dir1))
                         {
-                            var exe = Path.Combine(dir1, "bin", "1cv8.exe");
-                            if (File.Exists(exe)) Platforms.Add(exe);
-                        }
-
-                        // Shallow search: examine first-level subdirectories for bin\1cv8.exe
-                        foreach (var sub in Directory.EnumerateDirectories(root))
-                        {
                             try
                             {
-                                var exePath = Path.Combine(sub, "bin", "1cv8.exe");
-                                if (File.Exists(exePath) && !Platforms.Contains(exePath, StringComparer.OrdinalIgnoreCase))
-                                    Platforms.Add(exePath);
+                                foreach (var exePath in Directory.EnumerateFiles(dir1, "1cv8c.exe", SearchOption.AllDirectories))
+                                {
+                                    if (File.Exists(exePath) && !Platforms.Contains(exePath, StringComparer.OrdinalIgnoreCase))
+                                        Platforms.Add(exePath);
+                                }
                             }
-                            catch { }
+                            catch
+                            {
+                                // ignore access errors
+                            }
+                        }
+
+                        // If none found yet, do a shallow two-level search: root\*\bin\1cv8.exe and root\*\*\bin\1cv8.exe
+                        if (Platforms.Count == 0)
+                        {
+                            foreach (var sub in Directory.EnumerateDirectories(root))
+                            {
+                                try
+                                {
+                                    var exePath = Path.Combine(sub, "bin", "1cv8c.exe");
+                                    if (File.Exists(exePath) && !Platforms.Contains(exePath, StringComparer.OrdinalIgnoreCase))
+                                        Platforms.Add(exePath);
+
+                                    // check one level deeper
+                                    foreach (var sub2 in Directory.EnumerateDirectories(sub))
+                                    {
+                                        try
+                                        {
+                                            var exePath2 = Path.Combine(sub2, "bin", "1cv8c.exe");
+                                            if (File.Exists(exePath2) && !Platforms.Contains(exePath2, StringComparer.OrdinalIgnoreCase))
+                                                Platforms.Add(exePath2);
+                                        }
+                                        catch { }
+                                    }
+                                }
+                                catch { }
+                            }
                         }
                     }
                     catch { }
@@ -205,6 +230,16 @@ namespace _1CLauncher.ViewModels
             ExternalUrl = settings.ExternalUrl;
 
             LoadBasesFromIbasesFile();
+
+            // Populate available 1C platform executables on startup
+            try
+            {
+                RefreshPlatforms();
+            }
+            catch
+            {
+                // ignore discovery errors
+            }
 
             // Do not restore SelectedBase from settings (not persisted)
         }
