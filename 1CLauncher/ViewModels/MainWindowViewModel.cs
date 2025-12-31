@@ -1,11 +1,9 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
-using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -18,6 +16,101 @@ namespace _1CLauncher.ViewModels
 {
     public partial class MainWindowViewModel : ViewModelBase
     {
+        // Available 1C platform executables
+        public ObservableCollection<string> Platforms { get; } = new();
+
+        private string? _selectedPlatform;
+        public string? SelectedPlatform
+        {
+            get => _selectedPlatform;
+            set
+            {
+                if (SetProperty(ref _selectedPlatform, value))
+                {
+                    PlatformPath = value ?? string.Empty;
+                }
+            }
+        }
+
+        private string _platformPath = string.Empty;
+        public string PlatformPath
+        {
+            get => _platformPath;
+            set => SetProperty(ref _platformPath, value);
+        }
+
+        // Add a platform executable path (called from view)
+        public void AddPlatformFromPath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+                return;
+
+            try
+            {
+                if (File.Exists(path))
+                {
+                    if (!Platforms.Contains(path, StringComparer.OrdinalIgnoreCase))
+                        Platforms.Add(path);
+
+                    SelectedPlatform = path;
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+
+        // Try to discover common 1C platform executables on the machine
+        public void RefreshPlatforms()
+        {
+            try
+            {
+                Platforms.Clear();
+
+                var candidates = new List<string>();
+                var pf = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+                var pf86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+                if (!string.IsNullOrWhiteSpace(pf)) candidates.Add(pf);
+                if (!string.IsNullOrWhiteSpace(pf86) && !string.Equals(pf86, pf, StringComparison.OrdinalIgnoreCase)) candidates.Add(pf86);
+
+                foreach (var root in candidates)
+                {
+                    try
+                    {
+                        // Check common folders directly
+                        var dir1 = Path.Combine(root, "1cv8");
+                        if (Directory.Exists(dir1))
+                        {
+                            var exe = Path.Combine(dir1, "bin", "1cv8.exe");
+                            if (File.Exists(exe)) Platforms.Add(exe);
+                        }
+
+                        // Shallow search: examine first-level subdirectories for bin\1cv8.exe
+                        foreach (var sub in Directory.EnumerateDirectories(root))
+                        {
+                            try
+                            {
+                                var exePath = Path.Combine(sub, "bin", "1cv8.exe");
+                                if (File.Exists(exePath) && !Platforms.Contains(exePath, StringComparer.OrdinalIgnoreCase))
+                                    Platforms.Add(exePath);
+                            }
+                            catch { }
+                        }
+                    }
+                    catch { }
+                }
+
+                // keep previously selected platform if still present
+                if (Platforms.Count > 0 && string.IsNullOrWhiteSpace(SelectedPlatform))
+                    SelectedPlatform = Platforms[0];
+            }
+            catch
+            {
+                // ignore discovery errors
+            }
+        }
+
         // Input fields bound from the view
         private string _username = string.Empty;
         public string Username
@@ -82,7 +175,14 @@ namespace _1CLauncher.ViewModels
         public string ConnectionString
         {
             get => _connectionString;
-            set => SetProperty(ref _connectionString, value);
+            set
+            {
+                if (SetProperty(ref _connectionString, value))
+                {
+                    // When connection string changes, update whether launch is allowed
+                    LaunchCommand?.NotifyCanExecuteChanged();
+                }
+            }
         }
 
         private string _statusMessage = string.Empty;
@@ -92,37 +192,13 @@ namespace _1CLauncher.ViewModels
             set => SetProperty(ref _statusMessage, value);
         }
 
-        // Platforms support
-        public ObservableCollection<string> Platforms { get; } = new();
-        private readonly Dictionary<string, string> _platformPaths = new(StringComparer.OrdinalIgnoreCase);
-
-        private string? _selectedPlatform;
-        public string? SelectedPlatform
-        {
-            get => _selectedPlatform;
-            set
-            {
-                if (SetProperty(ref _selectedPlatform, value))
-                {
-                    if (!string.IsNullOrEmpty(value) && _platformPaths.TryGetValue(value, out var p))
-                        PlatformPath = p;
-                    else
-                        PlatformPath = string.Empty;
-                }
-            }
-        }
-
-        private string _platformPath = string.Empty;
-        public string PlatformPath
-        {
-            get => _platformPath;
-            set => SetProperty(ref _platformPath, value);
-        }
-
         public IAsyncRelayCommand LaunchCommand { get; }
 
         public MainWindowViewModel()
         {
+            // Initialize command with CanExecute that requires `ws` parameter in ConnectionString
+            LaunchCommand = new AsyncRelayCommand(CheckAuthAsync, CanLaunch);
+
             var settings = SettingsService.Load();
             Username = settings.Username;
             Domain = settings.Domain;
@@ -130,15 +206,16 @@ namespace _1CLauncher.ViewModels
 
             LoadBasesFromIbasesFile();
 
-            // load platforms
-            LoadInstalledPlatforms();
-            if (Platforms.Count == 0)
-                StatusMessage = "No 1C platforms found. Use Browse to add one or click Refresh.";
-            else
-                StatusMessage = $"Found {Platforms.Count} platform(s).";
+            // Do not restore SelectedBase from settings (not persisted)
+        }
 
-            // keep existing command for auth
-            LaunchCommand = new AsyncRelayCommand(CheckAuthAsync);
+        private bool CanLaunch()
+        {
+            if (string.IsNullOrWhiteSpace(ConnectionString))
+                return false;
+
+            // check for parameter ws anywhere in the connection string (case-insensitive)
+            return ConnectionString.IndexOf("ws", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private async Task CheckAuthAsync()
@@ -366,110 +443,6 @@ namespace _1CLauncher.ViewModels
             {
                 // Fail silently - file might be absent or unreadable
             }
-        }
-
-        public void RefreshPlatforms()
-        {
-            LoadInstalledPlatforms();
-            if (Platforms.Count == 0)
-                StatusMessage = "No 1C platforms found. Use Browse to add one or click Refresh.";
-            else
-                StatusMessage = $"Found {Platforms.Count} platform(s).";
-        }
-
-        public void AddPlatformFromPath(string path)
-        {
-            if (string.IsNullOrWhiteSpace(path)) return;
-            try
-            {
-                if (!File.Exists(path)) return;
-                var dir = Path.GetDirectoryName(path) ?? string.Empty;
-                var folder = Path.GetFileName(dir) ?? string.Empty;
-                var display = folder + " - " + path;
-                if (!Platforms.Contains(display)) { Platforms.Add(display); _platformPaths[display] = path; }
-                SelectedPlatform = display; PlatformPath = path; StatusMessage = $"Added platform: {display}";
-            }
-            catch (Exception ex) { StatusMessage = "Error adding platform: " + ex.Message; }
-        }
-
-        private void LoadInstalledPlatforms()
-        {
-            try
-            {
-                Platforms.Clear();
-                _platformPaths.Clear();
-
-                var pf64 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
-                var pf86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
-
-                var roots = new List<(string path, string arch)>();
-                if (!string.IsNullOrWhiteSpace(pf64) && Directory.Exists(Path.Combine(pf64, "1cv8"))) roots.Add((pf64, "64-bit"));
-                if (!string.IsNullOrWhiteSpace(pf86) && Directory.Exists(Path.Combine(pf86, "1cv8"))) roots.Add((pf86, "32-bit"));
-
-                var versionDirPattern = new Regex("^\\d+(?:\\.\\d+)*$");
-
-                foreach (var (root, arch) in roots)
-                {
-                    try
-                    {
-                        var baseDir = Path.Combine(root, "1cv8");
-                        if (!Directory.Exists(baseDir))
-                            continue;
-
-                        foreach (var sub in Directory.EnumerateDirectories(baseDir, "*", SearchOption.TopDirectoryOnly))
-                        {
-                            var folder = Path.GetFileName(sub) ?? string.Empty;
-                            if (!versionDirPattern.IsMatch(folder))
-                                continue;
-
-                            var exeCandidates = new[] { Path.Combine(sub, "bin", "1cv8c.exe"), Path.Combine(sub, "bin", "1cv8.exe"), Path.Combine(sub, "1cv8.exe") };
-                            string? foundExe = null;
-                            foreach (var c in exeCandidates)
-                            {
-                                try { if (File.Exists(c)) { foundExe = c; break; } } catch { }
-                            }
-
-                            if (foundExe != null)
-                            {
-                                var display = folder + " (" + arch + ") - " + foundExe;
-                                if (!Platforms.Contains(display)) { Platforms.Add(display); _platformPaths[display] = foundExe; }
-                            }
-                        }
-                    }
-                    catch { }
-                }
-
-                // fallback: scan program files for 1cv8.exe
-                if (!Platforms.Any())
-                {
-                    var patterns = new[] { "1cv8c.exe", "1cv8.exe", "1cv8s.exe" };
-                    foreach (var root in new[] { pf64, pf86 }.Distinct().Where(p => !string.IsNullOrWhiteSpace(p)))
-                    {
-                        if (!Directory.Exists(root)) continue;
-                        foreach (var pattern in patterns)
-                        {
-                            try
-                            {
-                                var matches = Directory.EnumerateFiles(root, pattern, SearchOption.AllDirectories).Take(200);
-                                foreach (var m in matches)
-                                {
-                                    try
-                                    {
-                                        var dir = Path.GetFileName(Path.GetDirectoryName(m) ?? string.Empty);
-                                        var display = dir + " - " + m;
-                                        if (!Platforms.Contains(display)) { Platforms.Add(display); _platformPaths[display] = m; }
-                                    }
-                                    catch { }
-                                }
-                            }
-                            catch { }
-                        }
-                    }
-                }
-
-                if (Platforms.Count > 0) SelectedPlatform = Platforms[0];
-            }
-            catch { }
         }
     }
 }
