@@ -20,7 +20,7 @@ if (app.Environment.IsDevelopment())
 }
 
 // New endpoint: checkAuth
-// Accepts JSON body: { "username": "...", "password": "..." }
+// Accepts JSON body: { "username": "...", "password": "...", "domain": "..." }
 // Returns: { "authenticated": true/false, "token": "..." }
 app.MapPost("/checkAuth", async (Credentials creds, IConfiguration config) =>
 {
@@ -62,8 +62,10 @@ app.MapPost("/checkAuth", async (Credentials creds, IConfiguration config) =>
             connection.SessionOptions.SecureSocketLayer = true;
         }
 
-        // Optionally allow an explicit domain from config to build username as DOMAIN\user
-        var domain = config["DomainController:Domain"];
+        // Prefer domain from request; fall back to configured domain if request does not contain it
+        var domainFromRequest = creds.Domain;
+        var domain = !string.IsNullOrWhiteSpace(domainFromRequest) ? domainFromRequest : config["DomainController:Domain"];
+
         var usernameForBind = creds.Username ?? string.Empty;
         if (!string.IsNullOrWhiteSpace(domain) && !usernameForBind.Contains("\\") && !usernameForBind.Contains("@"))
         {
@@ -99,10 +101,9 @@ app.MapPost("/checkAuth", async (Credentials creds, IConfiguration config) =>
             rawUsername = rawUsername.Split('@', 2)[0];
 
         var claims = new List<Claim>
-        {
-            new Claim(ClaimTypes.Name, rawUsername),
-            new Claim("upn", creds.Username ?? string.Empty)
-        };
+            {
+                new Claim("IssuedAt", DateTime.Now.ToString(), ClaimValueTypes.Integer64),
+            };
 
         var now = DateTime.UtcNow;
         var token = new JwtSecurityToken(
@@ -113,6 +114,9 @@ app.MapPost("/checkAuth", async (Credentials creds, IConfiguration config) =>
             expires: now.AddMinutes(expiresMinutes),
             signingCredentials: signingCreds
         );
+
+        token.Payload.Add("sub", usernameForBind);
+        token.Payload.Add("iat", ((DateTimeOffset)DateTime.Now).ToUnixTimeSeconds());
 
         var tokenString = new JwtSecurityTokenHandler().WriteToken(token);
 
@@ -134,4 +138,4 @@ app.MapPost("/checkAuth", async (Credentials creds, IConfiguration config) =>
 app.Run();
 
 
-internal record Credentials(string Username, string Password);
+internal record Credentials(string Username, string Password, string? Domain);

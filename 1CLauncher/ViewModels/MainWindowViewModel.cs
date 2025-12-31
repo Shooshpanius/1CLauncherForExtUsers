@@ -120,7 +120,7 @@ namespace _1CLauncher.ViewModels
                 StatusMessage = "Checking authentication...";
 
                 using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
-                var payload = JsonSerializer.Serialize(new { username = Username, password = Password });
+                var payload = JsonSerializer.Serialize(new { username = Username, password = Password, domain = Domain });
                 using var content = new StringContent(payload, Encoding.UTF8, "application/json");
 
                 var resp = await client.PostAsync(url, content);
