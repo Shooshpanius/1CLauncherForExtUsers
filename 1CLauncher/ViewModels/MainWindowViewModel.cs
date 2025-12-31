@@ -285,7 +285,79 @@ namespace _1CLauncher.ViewModels
                         (authProp.ValueKind == JsonValueKind.True || authProp.ValueKind == JsonValueKind.False))
                     {
                         var authenticated = authProp.GetBoolean();
-                        StatusMessage = authenticated ? "Authenticated" : "Authentication failed";
+                        if (!authenticated)
+                        {
+                            StatusMessage = "Authentication failed";
+                            return;
+                        }
+
+                        // authenticated == true
+                        // try to get token
+                        string? token = null;
+                        if (doc.RootElement.TryGetProperty("token", out var tokenProp) && tokenProp.ValueKind == JsonValueKind.String)
+                            token = tokenProp.GetString();
+
+                        StatusMessage = "Authenticated";
+
+                        if (string.IsNullOrWhiteSpace(token))
+                        {
+                            // No token - nothing to launch
+                            return;
+                        }
+
+                        // extract ws parameter from ConnectionString (supports ws="..." or ws=...)
+                        string ws = string.Empty;
+                        try
+                        {
+                            var conn = ConnectionString ?? string.Empty;
+                            var m = Regex.Match(conn, "\\bws\\s*=\\s*\"([^\"]+)\"", RegexOptions.IgnoreCase);
+                            if (m.Success)
+                                ws = m.Groups[1].Value.Trim();
+                            else
+                            {
+                                m = Regex.Match(conn, "\\bws\\s*=\\s*([^;\\s]+)", RegexOptions.IgnoreCase);
+                                if (m.Success)
+                                    ws = m.Groups[1].Value.Trim().Trim('"');
+                            }
+                        }
+                        catch { }
+
+                        if (string.IsNullOrWhiteSpace(ws))
+                        {
+                            StatusMessage = "Authenticated, but 'ws' parameter not found in Connect; cannot launch.";
+                            return;
+                        }
+
+                        // determine executable path
+                        var exePath = SelectedPlatform ?? PlatformPath;
+                        if (string.IsNullOrWhiteSpace(exePath) || !File.Exists(exePath))
+                        {
+                            StatusMessage = "Authenticated, token received, but platform executable not selected or not found.";
+                            return;
+                        }
+
+                        try
+                        {
+                            // prepare arguments
+                            // wrap ws and token in quotes to be safe
+                            var args = $"ENTERPRISE /WS \"{ws}\" /AccessToken:\"{token}\"";
+
+                            var psi = new System.Diagnostics.ProcessStartInfo
+                            {
+                                FileName = exePath,
+                                Arguments = args,
+                                UseShellExecute = false,
+                                CreateNoWindow = true,
+                            };
+
+                            System.Diagnostics.Process.Start(psi);
+                            StatusMessage = "Launched 1C with token";
+                        }
+                        catch (Exception ex)
+                        {
+                            StatusMessage = "Authenticated but failed to launch: " + ex.Message;
+                        }
+
                         return;
                     }
                 }
