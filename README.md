@@ -51,3 +51,4 @@ API
 Лицензия
 - Этот проект распространяется под лицензией GNU General Public License версии 3 (GNU GPL v3). Смотрите файл `LICENSE` в корне репозитория для полного текста лицензии.
 
+- ![Ссылка на публикацию на Инфостарт: https://infostart.ru/1c/articles/2572376/](https://infostart.ru/bitrix/templates/sandbox_empty/assets/tpl/abo/img/logo.svg)
