@@ -53,5 +53,5 @@ API
 
 - ![Ссылка на публикацию на Инфостарт: https://infostart.ru/1c/articles/2572376/](https://infostart.ru/bitrix/templates/sandbox_empty/assets/tpl/abo/img/logo.svg)
 
-[<img src="[path/to/image.png](https://infostart.ru/bitrix/templates/sandbox_empty/assets/tpl/abo/img/logo.svg)">]([https://link-to-your-URL/](https://infostart.ru/1c/articles/2572376/))
+[<img src="[path/to/image.png]">](https://infostart.ru/bitrix/templates/sandbox_empty/assets/tpl/abo/img/logo.svg)">]([https://link-to-your-URL/](https://infostart.ru/1c/articles/2572376/))
 
