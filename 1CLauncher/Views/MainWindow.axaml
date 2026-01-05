@@ -27,15 +27,21 @@
         <TextBox Watermark="Domain" Text="{Binding Domain, Mode=TwoWay}" HorizontalAlignment="Stretch" />
 
         <TextBlock Margin="0 5">Infobase:</TextBlock>
-        <ComboBox ItemsSource="{Binding Bases}" SelectedItem="{Binding SelectedBase, Mode=TwoWay}" HorizontalAlignment="Stretch" />
+        <ComboBox ItemsSource="{Binding Bases}" SelectedItem="{Binding SelectedBase, Mode=TwoWay}" HorizontalAlignment="Stretch">
+            <ComboBox.ItemTemplate>
+                <DataTemplate>
+                    <TextBlock Text="{Binding Display}" />
+                </DataTemplate>
+            </ComboBox.ItemTemplate>
+        </ComboBox>
 
         <TextBlock Margin="0 3">Connect:</TextBlock>
         <TextBox Text="{Binding ConnectionString, Mode=OneWay}" IsReadOnly="True" IsTabStop="False" Focusable="False" TextWrapping="Wrap" HorizontalAlignment="Stretch" />
 
         <!-- Platform selection -->
         <TextBlock Margin="0 5">Platform:</TextBlock>
-        <StackPanel Orientation="Horizontal" Spacing="6">
-            <ComboBox ItemsSource="{Binding Platforms}" SelectedItem="{Binding SelectedPlatform, Mode=TwoWay}" HorizontalAlignment="Stretch" Width="160" />
+        <ComboBox ItemsSource="{Binding Platforms}" SelectedItem="{Binding SelectedPlatform, Mode=TwoWay}" HorizontalAlignment="Stretch" />
+        <StackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Right">
             <Button Content="Browse..." Click="BrowsePlatform_Click" Width="60" />
             <Button Content="Refresh" Click="RefreshPlatforms_Click" Width="60" />
         </StackPanel>

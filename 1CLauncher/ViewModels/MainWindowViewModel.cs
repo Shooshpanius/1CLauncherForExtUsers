@@ -3,6 +3,9 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using Microsoft.Win32;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
@@ -19,6 +22,9 @@ namespace _1CLauncher.ViewModels
         // Available 1C platform executables
         public ObservableCollection<string> Platforms { get; } = new();
 
+        // map display -> exe path
+        private readonly Dictionary<string, string> _platformPaths = new(StringComparer.OrdinalIgnoreCase);
+
         private string? _selectedPlatform;
         public string? SelectedPlatform
         {
@@ -27,7 +33,10 @@ namespace _1CLauncher.ViewModels
             {
                 if (SetProperty(ref _selectedPlatform, value))
                 {
-                    PlatformPath = value ?? string.Empty;
+                    if (!string.IsNullOrEmpty(value) && _platformPaths.TryGetValue(value, out var p))
+                        PlatformPath = p;
+                    else
+                        PlatformPath = string.Empty;
                 }
             }
         }
@@ -49,10 +58,14 @@ namespace _1CLauncher.ViewModels
             {
                 if (File.Exists(path))
                 {
-                    if (!Platforms.Contains(path, StringComparer.OrdinalIgnoreCase))
-                        Platforms.Add(path);
-
-                    SelectedPlatform = path;
+                    var folder = Path.GetFileName(Path.GetDirectoryName(path) ?? string.Empty);
+                    var display = (string.IsNullOrWhiteSpace(folder) ? "Manual" : folder) + " (manual)";
+                    if (!Platforms.Contains(display))
+                    {
+                        Platforms.Add(display);
+                        _platformPaths[display] = path;
+                    }
+                    SelectedPlatform = display;
                 }
             }
             catch
@@ -127,8 +140,11 @@ namespace _1CLauncher.ViewModels
                 }
 
                 // keep previously selected platform if still present
-                if (Platforms.Count > 0 && string.IsNullOrWhiteSpace(SelectedPlatform))
-                    SelectedPlatform = Platforms[0];
+                if (Platforms.Count > 0)
+                {
+                    if (string.IsNullOrWhiteSpace(SelectedPlatform) || !Platforms.Contains(SelectedPlatform))
+                        SelectedPlatform = Platforms[0];
+                }
             }
             catch
             {
@@ -178,19 +194,26 @@ namespace _1CLauncher.ViewModels
         }
 
         // Info-bases loaded from ibases.v8i
-        public ObservableCollection<string> Bases { get; } = new();
+        public class BaseItem
+        {
+            public string Name { get; set; } = string.Empty;
+            public string Connect { get; set; } = string.Empty;
+            public string Display { get; set; } = string.Empty; // shown in ComboBox
+        }
+
+        public ObservableCollection<BaseItem> Bases { get; } = new();
 
         private readonly Dictionary<string, string> _connects = new(StringComparer.OrdinalIgnoreCase);
 
-        private string? _selectedBase;
-        public string? SelectedBase
+        private BaseItem? _selectedBase;
+        public BaseItem? SelectedBase
         {
             get => _selectedBase;
             set
             {
                 if (SetProperty(ref _selectedBase, value))
                 {
-                    ConnectionString = FindConnectForBase(value);
+                    ConnectionString = value?.Connect ?? FindConnectForBase(value?.Name);
                     SaveSettings();
                 }
             }
@@ -229,19 +252,11 @@ namespace _1CLauncher.ViewModels
             Domain = settings.Domain;
             ExternalUrl = settings.ExternalUrl;
 
+            // load platforms first (so we can show platform info alongside bases)
+            LoadInstalledPlatforms();
+
+            // then load bases
             LoadBasesFromIbasesFile();
-
-            // Populate available 1C platform executables on startup
-            try
-            {
-                RefreshPlatforms();
-            }
-            catch
-            {
-                // ignore discovery errors
-            }
-
-            // Do not restore SelectedBase from settings (not persisted)
         }
 
         private bool CanLaunch()
@@ -328,8 +343,8 @@ namespace _1CLauncher.ViewModels
                             return;
                         }
 
-                        // determine executable path
-                        var exePath = SelectedPlatform ?? PlatformPath;
+                        // determine executable path: use only PlatformPath (mapped from selected display)
+                        var exePath = PlatformPath;
                         if (string.IsNullOrWhiteSpace(exePath) || !File.Exists(exePath))
                         {
                             StatusMessage = "Authenticated, token received, but platform executable not selected or not found.";
@@ -420,7 +435,7 @@ namespace _1CLauncher.ViewModels
                     return;
 
                 var content = File.ReadAllText(path);
-                var names = new List<string>();
+                var names = new List<(string name, string connect)>();
 
                 // Line-based parsing: when a line [Name] is found, take the next non-empty line and extract Connect=...
                 try
@@ -454,7 +469,7 @@ namespace _1CLauncher.ViewModels
                                 }
                             }
 
-                            names.Add(name);
+                            names.Add((name, conn));
                             _connects[name] = conn;
                         }
                     }
@@ -488,7 +503,7 @@ namespace _1CLauncher.ViewModels
                                     conn = m.Groups[1].Value.Trim().Trim('"');
                             }
 
-                            names.Add(name);
+                            names.Add((name, conn));
                             _connects[name] = conn;
                         }
                     }
@@ -505,7 +520,7 @@ namespace _1CLauncher.ViewModels
                     {
                         var doc = XDocument.Parse(content);
                         var xmlNames = doc.Descendants().Attributes("Name").Select(a => a.Value).Where(s => !string.IsNullOrWhiteSpace(s));
-                        names.AddRange(xmlNames);
+                        names.AddRange(xmlNames.Select(x => (x, string.Empty)));
 
                         // try to get Connect attributes if present
                         var elements = doc.Descendants().Where(e => e.Attribute("Name") != null);
@@ -530,18 +545,25 @@ namespace _1CLauncher.ViewModels
                 {
                     var matches = Regex.Matches(content, @"Name\s*=\s*""([^""\]]+)""", RegexOptions.IgnoreCase);
                     foreach (Match m in matches)
-                        names.Add(m.Groups[1].Value);
+                        names.Add((m.Groups[1].Value, string.Empty));
 
                     if (!names.Any())
                     {
                         var matchesRu = Regex.Matches(content, @"Наименование\s*=\s*""([^""\]]+)""", RegexOptions.IgnoreCase);
                         foreach (Match m in matchesRu)
-                            names.Add(m.Groups[1].Value);
+                            names.Add((m.Groups[1].Value, string.Empty));
                     }
                 }
 
-                foreach (var n in names.Distinct())
-                    Bases.Add(n);
+                // Build display string using platform summary from detected platforms
+                var platformSummary = Platforms.FirstOrDefault() ?? "(platform unknown)";
+
+                foreach (var n in names.Select(x => x).DistinctBy(t => t.name))
+                {
+                    var item = new BaseItem { Name = n.name, Connect = n.connect };
+                    item.Display = $"{n.name} — {platformSummary}";
+                    Bases.Add(item);
+                }
 
                 if (Bases.Count > 0)
                     SelectedBase = Bases[0];
@@ -550,6 +572,112 @@ namespace _1CLauncher.ViewModels
             {
                 // Fail silently - file might be absent or unreadable
             }
+        }
+
+        private void LoadInstalledPlatforms()
+        {
+            try
+            {
+                Platforms.Clear();
+                _platformPaths.Clear();
+
+                var pf64 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+                var pf86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+                var roots = new[] { pf64, pf86 }.Where(p => !string.IsNullOrWhiteSpace(p)).Distinct();
+
+                var versionDirPattern = new Regex("^\\d+(?:\\.\\d+)*$");
+
+                foreach (var root in roots)
+                {
+                    try
+                    {
+                        var baseDir = Path.Combine(root, "1cv8");
+                        if (!Directory.Exists(baseDir))
+                            continue;
+
+                        foreach (var sub in Directory.EnumerateDirectories(baseDir, "*", SearchOption.TopDirectoryOnly))
+                        {
+                            var folder = Path.GetFileName(sub) ?? string.Empty;
+                            if (!versionDirPattern.IsMatch(folder))
+                                continue;
+
+                            var exeCandidates = new[] { Path.Combine(sub, "bin", "1cv8c.exe"), Path.Combine(sub, "bin", "1cv8.exe"), Path.Combine(sub, "1cv8.exe") };
+                            string? foundExe = null;
+                            foreach (var c in exeCandidates)
+                            {
+                                try { if (File.Exists(c)) { foundExe = c; break; } } catch { }
+                            }
+
+                            if (foundExe != null)
+                            {
+                                var arch = root.Equals(pf64, StringComparison.OrdinalIgnoreCase) ? "64-bit" : "32-bit";
+                                var friendly = GetDisplayNameForPath(foundExe) ?? ("1C:Предприятие " + folder);
+                                var display = friendly + " (" + arch + ")";
+                                if (!Platforms.Contains(display))
+                                {
+                                    Platforms.Add(display);
+                                    _platformPaths[display] = foundExe;
+                                }
+                                // set first discovered platform as selected
+                                if (Platforms.Count > 0 && string.IsNullOrWhiteSpace(SelectedPlatform))
+                                    SelectedPlatform = Platforms[0];
+                            }
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+        }
+
+        private string? GetDisplayNameForPath(string exePath)
+        {
+            try
+            {
+                if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                    return null;
+
+                var dir = Path.GetDirectoryName(exePath) ?? string.Empty;
+                var candidates = new[] { exePath, dir };
+
+                foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
+                {
+                    try
+                    {
+                        using var baseKey = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, view);
+                        using var uninstall = baseKey.OpenSubKey("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall");
+                        if (uninstall == null) continue;
+
+                        foreach (var sub in uninstall.GetSubKeyNames())
+                        {
+                            try
+                            {
+                                using var sk = uninstall.OpenSubKey(sub);
+                                if (sk == null) continue;
+                                var displayName = sk.GetValue("DisplayName")?.ToString() ?? string.Empty;
+                                var installLoc = sk.GetValue("InstallLocation")?.ToString() ?? string.Empty;
+                                var displayIcon = sk.GetValue("DisplayIcon")?.ToString() ?? string.Empty;
+                                var uninstallStr = sk.GetValue("UninstallString")?.ToString() ?? string.Empty;
+
+                                foreach (var cand in candidates)
+                                {
+                                    if (!string.IsNullOrWhiteSpace(installLoc) && cand.StartsWith(installLoc, StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(displayName))
+                                        return displayName;
+                                    if (!string.IsNullOrWhiteSpace(displayIcon) && displayIcon.IndexOf(cand, StringComparison.OrdinalIgnoreCase) >= 0 && !string.IsNullOrWhiteSpace(displayName))
+                                        return displayName;
+                                    if (!string.IsNullOrWhiteSpace(uninstallStr) && uninstallStr.IndexOf(cand, StringComparison.OrdinalIgnoreCase) >= 0 && !string.IsNullOrWhiteSpace(displayName))
+                                        return displayName;
+                                }
+                            }
+                            catch { }
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+
+            return null;
         }
     }
 }
