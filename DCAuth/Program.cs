@@ -45,162 +45,141 @@ app.MapPost("/checkAuth", async (Credentials creds, IConfiguration config) =>
 
     var dcUrl = GetConfigurationValue(config, "DomainController:Url", app.Environment);
     if (string.IsNullOrWhiteSpace(dcUrl))
-    {
         return Results.Problem(detail: "Domain controller URL not configured", statusCode: 500);
-    }
 
-    // parse URL - support ldap://, ldaps:// or plain hostname
-    string host = dcUrl;
-    int port = 389;
-    bool useSsl = false;
+    // parse URL
+    if (!Uri.TryCreate(dcUrl, UriKind.Absolute, out var uri))
+        return Results.Problem(detail: "Domain controller URL invalid", statusCode: 500);
 
-    if (Uri.TryCreate(dcUrl, UriKind.Absolute, out var uri))
-    {
-        host = uri.Host;
-        if (!uri.IsDefaultPort)
-            port = uri.Port;
-        else
-            port = (uri.Scheme.Equals("ldaps", StringComparison.OrdinalIgnoreCase)) ? 636 : 389;
-        useSsl = uri.Scheme.Equals("ldaps", StringComparison.OrdinalIgnoreCase);
-    }
+    var host = uri.Host;
+    var port = uri.IsDefaultPort ? (uri.Scheme.Equals("ldaps", StringComparison.OrdinalIgnoreCase) ? 636 : 389) : uri.Port;
+    var useSsl = uri.Scheme.Equals("ldaps", StringComparison.OrdinalIgnoreCase);
 
-    // Prefer domain from request; fall back to configured domain if request does not contain it
     var domainFromRequest = creds.Domain;
     var domain = !string.IsNullOrWhiteSpace(domainFromRequest) ? domainFromRequest : GetConfigurationValue(config, "DomainController:Domain", app.Environment);
 
-    // Determine credential for bind in a way compatible with Negotiate/Basic
-    // Normalize incoming username into components when possible.
+    // Normalize username
     var rawUsername = creds.Username ?? string.Empty;
-    NetworkCredential credential;
+    var username = rawUsername;
+    var bindDomain = domain;
 
     if (rawUsername.Contains("\\"))
     {
         var parts = rawUsername.Split('\\', 2);
-        var domPart = parts[0];
-        var userPart = parts.Length > 1 ? parts[1] : string.Empty;
-        credential = new NetworkCredential(userPart, creds.Password ?? string.Empty, domPart);
+        bindDomain = parts[0];
+        username = parts.Length > 1 ? parts[1] : string.Empty;
     }
-    else if (rawUsername.Contains("@"))
+
+    // If UPN provided (user@domain), use as-is
+    if (username.Contains("@"))
     {
-        // UPN form - supply as username; domain left empty
-        credential = new NetworkCredential(rawUsername, creds.Password ?? string.Empty);
+        bindDomain = null;
     }
-    else if (!string.IsNullOrWhiteSpace(domain))
-    {
-        // use provided domain as domain component (NetworkCredential will format correctly for Negotiate)
-        credential = new NetworkCredential(rawUsername, creds.Password ?? string.Empty, domain);
-    }
-    else
-    {
-        credential = new NetworkCredential(rawUsername, creds.Password ?? string.Empty);
-    }
+
+    var password = creds.Password ?? string.Empty;
 
     try
     {
-        // Use Novell.Directory.Ldap for cross-platform simple bind. Prefer StartTLS/LDAPS when server requires strong auth.
-        var bindUser = credential.UserName;
-        if (!string.IsNullOrWhiteSpace(credential.Domain) && !bindUser.Contains("@"))
+        // local helper using Novell.Directory.Ldap synchronous API wrapped in Task.Run
+        async Task<bool> IsUserExistAsyncLocal(string h, int p, bool initialSsl, string? dom, string user, string pwd)
         {
-            bindUser = $"{bindUser}@{credential.Domain}";
-        }
+            string bindName = !string.IsNullOrWhiteSpace(user) && user.Contains("@")
+                ? user
+                : (!string.IsNullOrWhiteSpace(dom) ? $"{dom}\\{user}" : user);
 
-        using var connection = new Novell.Directory.Ldap.LdapConnection();
-        if (useSsl)
-            connection.SecureSocketLayer = true;
+            // Primary attempt
+            try
+            {
+                using var conn = new LdapConnection();
+                if (initialSsl)
+                    conn.SecureSocketLayer = true;
 
-        // Try simple bind; on "Strong authentication" try StartTLS (port 389) then LDAPS (636).
-        try
-        {
-            await Task.Run(() =>
-            {
-                connection.Connect(host, port);
-                connection.Bind(bindUser, creds.Password ?? string.Empty);
-            });
-        }
-        catch (Novell.Directory.Ldap.LdapException le) when (le.Message?.IndexOf("Strong authentication", StringComparison.OrdinalIgnoreCase) >= 0)
-        {
-            if (!useSsl)
-            {
-                // Attempt StartTLS (upgrade) first
-                try
+                await Task.Run(() =>
                 {
-                    using var startTlsConn = new Novell.Directory.Ldap.LdapConnection();
-                    await Task.Run(() =>
-                    {
-                        startTlsConn.Connect(host, port);
-                        startTlsConn.StartTls();
-                        startTlsConn.Bind(bindUser, creds.Password ?? string.Empty);
-                    });
-                }
-                catch (Novell.Directory.Ldap.LdapException)
-                {
-                    // Fallback to LDAPS on 636
-                    using var sslConn = new Novell.Directory.Ldap.LdapConnection { SecureSocketLayer = true };
-                    await Task.Run(() =>
-                    {
-                        sslConn.Connect(host, 636);
-                        sslConn.Bind(bindUser, creds.Password ?? string.Empty);
-                    });
-                }
+                    conn.Connect(h, p);
+                    conn.Bind(bindName, pwd);
+                });
+
+                try { if (conn.Connected) conn.Disconnect(); } catch { }
+                return true;
             }
-            else
+            catch (LdapException ex)
             {
-                throw;
+                var msg = ex.Message ?? string.Empty;
+                if (msg.IndexOf("Strong authentication", StringComparison.OrdinalIgnoreCase) >= 0 || msg.IndexOf("Error initializing SSL/TLS", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    // Try StartTLS
+                    try
+                    {
+                        using var startConn = new LdapConnection();
+                        await Task.Run(() =>
+                        {
+                            startConn.Connect(h, p);
+                            startConn.StartTls();
+                            startConn.Bind(bindName, pwd);
+                        });
+
+                        try { if (startConn.Connected) startConn.Disconnect(); } catch { }
+                        return true;
+                    }
+                    catch { }
+
+                    // Fallback to LDAPS
+                    try
+                    {
+                        using var sslConn = new LdapConnection { SecureSocketLayer = true };
+                        await Task.Run(() =>
+                        {
+                            sslConn.Connect(h, 636);
+                            sslConn.Bind(bindName, pwd);
+                        });
+
+                        try { if (sslConn.Connected) sslConn.Disconnect(); } catch { }
+                        return true;
+                    }
+                    catch { }
+                }
+
+                return false;
             }
-        }
-        finally
-        {
-            try { if (connection.Connected) connection.Disconnect(); } catch { }
         }
 
-        // If bind succeeded, authenticated -> generate JWT
+        var ok = await IsUserExistAsyncLocal(host, port, useSsl, bindDomain, username, password);
+        if (!ok)
+            return Results.Ok(new { authenticated = false });
+
+        // generate JWT same as sample
         var jwtKey = GetConfigurationValue(config, "Jwt:Key", app.Environment);
         var jwtIssuer = GetConfigurationValue(config, "Jwt:Issuer", app.Environment);
         var jwtAudience = GetConfigurationValue(config, "Jwt:Audience", app.Environment);
         var expiresMinutes = 60;
         var expiresCfg = GetConfigurationValue(config, "Jwt:ExpiresMinutes", app.Environment);
-        if (!string.IsNullOrWhiteSpace(expiresCfg) && int.TryParse(expiresCfg, out var m))
-            expiresMinutes = m;
+        if (!string.IsNullOrWhiteSpace(expiresCfg) && int.TryParse(expiresCfg, out var m)) expiresMinutes = m;
 
         if (string.IsNullOrWhiteSpace(jwtKey))
-        {
             return Results.Problem(detail: "JWT signing key not configured (Jwt:Key)", statusCode: 500);
-        }
 
-        var securityKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey));
-        var signingCreds = new SigningCredentials(securityKey, SecurityAlgorithms.HmacSha256);
+        var claims = new List<Claim> { new Claim("IssuedAt", DateTime.Now.ToString(), ClaimValueTypes.Integer64) };
+        var signingCreds = new SigningCredentials(new SymmetricSecurityKey(Encoding.ASCII.GetBytes(jwtKey)), SecurityAlgorithms.HmacSha256);
 
-
-        var claims = new List<Claim>
-            {
-                new Claim("IssuedAt", DateTime.Now.ToString(), ClaimValueTypes.Integer64),
-            };
-
-        var now = DateTime.UtcNow;
         var token = new JwtSecurityToken(
-            issuer: string.IsNullOrWhiteSpace(jwtIssuer) ? null : jwtIssuer,
-            audience: string.IsNullOrWhiteSpace(jwtAudience) ? null : jwtAudience,
+            issuer: jwtIssuer,
+            audience: jwtAudience,
+            notBefore: DateTime.UtcNow,
             claims: claims,
-            notBefore: now,
-            expires: now.AddMinutes(expiresMinutes),
+            expires: DateTime.UtcNow.AddMinutes(expiresMinutes),
             signingCredentials: signingCreds
         );
 
-        token.Payload.Add("sub", credential.UserName);
+        var subject = !string.IsNullOrWhiteSpace(bindDomain) && !username.Contains("@") ? $"{bindDomain}\\{username}" : username;
+        token.Payload.Add("sub", subject);
         token.Payload.Add("iat", ((DateTimeOffset)DateTime.Now).ToUnixTimeSeconds());
 
         var tokenString = new JwtSecurityTokenHandler().WriteToken(token);
-
         return Results.Ok(new { authenticated = true, token = tokenString });
-    }
-    catch (LdapException)
-    {
-        // authentication failed or other LDAP error
-        return Results.Ok(new { authenticated = false });
     }
     catch (Exception ex)
     {
-        // unexpected error
         return Results.Problem(detail: ex.Message, statusCode: 500);
     }
 })
