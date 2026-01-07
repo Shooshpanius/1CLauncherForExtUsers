@@ -9,9 +9,34 @@
 Требования
 - .NET SDK 8.0 (для `1CLauncher`)
 - .NET SDK 10.0 (для `DCAuth`)
-- Рекомендуется использовать `dotnet` CLI или Visual Studio 2022/2023 с поддержкой нужных таргетов.
+- Рекомендуется использовать `dotnet` CLI или Visual Studio 2022/2026 с поддержкой нужных таргетов.
 
-Как собрать и запустить
+Запуск сборки:
+1. Лаунчер под Windows:
+	- запуск 1CLauncher.exe
+	- параметр ExternalUrl в `%APPDATA%\\1CLauncher\\settings.json`
+2. Лаунчер под Linux (Ubuntu 24.04):
+	- sudo apt-get update && \
+      sudo apt-get install -y aspnetcore-runtime-8.0 && \
+      sudo apt-get install -y dotnet-runtime-8.0
+	- dotnet ./1CLauncher.dll
+	- параметр ExternalUrl в `~/.config/1CLauncher/settings.json`
+
+Конфиг для композера DCAuth:
+  dcauth:
+    container_name: dcauth
+    image: shooshpanius/dcauth:latest
+    restart: always
+    ports:
+      - "8090:8080"
+    environment:
+      DOMAINCONTROLLER_URL: ldap://***
+      JWT_KEY: ""
+      JWT_ISSUER: 
+      JWT_AUDIENCE: 
+      JWT_EXPIRESMINUTES: 60
+
+Запуск со сборкой:
 1. Откройте терминал в корне репозитория.
 2. Соберите сервис авторизации:
    - cd DCAuth

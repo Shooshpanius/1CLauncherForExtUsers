@@ -444,6 +444,11 @@ namespace _1CLauncher.ViewModels
                     candidates.Add(Path.Combine(userProfile, ".1cv8", "1CEStart", "ibases.v8i"));
                     candidates.Add(Path.Combine(userProfile, ".1cv8", "ibases.v8i"));
                     candidates.Add(Path.Combine(userProfile, ".config", "1C", "1CEStart", "ibases.v8i"));
+
+                    // Common Linux location used by some installations: ~/.1C/1cestart/ibases.v8i
+                    candidates.Add(Path.Combine(userProfile, ".1C", "1cestart", "ibases.v8i"));
+                    // Also add a case-variant that some systems may use
+                    candidates.Add(Path.Combine(userProfile, ".1C", "1CEStart", "ibases.v8i"));
                 }
 
                 // additional common linux config path
