@@ -1,5 +1,5 @@
 ﻿using System.Net;
-using System.DirectoryServices.Protocols;
+using Novell.Directory.Ldap;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
@@ -97,75 +97,60 @@ app.MapPost("/checkAuth", async (Credentials creds, IConfiguration config) =>
 
     try
     {
-        var identifier = new LdapDirectoryIdentifier(host, port, false, false);
-        // Try bind with reasonable defaults. Many AD installations require "strong authentication" for simple binds over plaintext;
-        // prefer Negotiate (Kerberos/NTLM) where possible, but allow Basic over LDAPS.
+        // Use Novell.Directory.Ldap for cross-platform simple bind. Prefer StartTLS/LDAPS when server requires strong auth.
+        var bindUser = credential.UserName;
+        if (!string.IsNullOrWhiteSpace(credential.Domain) && !bindUser.Contains("@"))
+        {
+            bindUser = $"{bindUser}@{credential.Domain}";
+        }
+
+        using var connection = new Novell.Directory.Ldap.LdapConnection();
+        if (useSsl)
+            connection.SecureSocketLayer = true;
+
+        // Try simple bind; on "Strong authentication" try StartTLS (port 389) then LDAPS (636).
         try
         {
-            // Primary attempt: use Negotiate for non-SSL, Basic for LDAPS
-            using var connection = new LdapConnection(identifier)
+            await Task.Run(() =>
             {
-                AuthType = useSsl ? AuthType.Basic : AuthType.Negotiate,
-                Timeout = TimeSpan.FromSeconds(5)
-            };
-
-            connection.SessionOptions.ProtocolVersion = 3;
-            if (useSsl)
-                connection.SessionOptions.SecureSocketLayer = true;
-
-            connection.Credential = credential;
-
-            // Perform bind on a background thread (Bind is synchronous)
-            await Task.Run(() => connection.Bind());
+                connection.Connect(host, port);
+                connection.Bind(bindUser, creds.Password ?? string.Empty);
+            });
         }
-        catch (DirectoryOperationException doe) when (doe.Message?.IndexOf("Strong authentication", StringComparison.OrdinalIgnoreCase) >= 0)
+        catch (Novell.Directory.Ldap.LdapException le) when (le.Message?.IndexOf("Strong authentication", StringComparison.OrdinalIgnoreCase) >= 0)
         {
-            // Server requires strong authentication for the attempted method. Try Negotiate explicitly as a fallback,
-            // then NTLM if Negotiate also fails.
-            var tried = new List<string> { useSsl ? "Basic" : "Negotiate" };
-            try
+            if (!useSsl)
             {
-                using var altConn = new LdapConnection(new LdapDirectoryIdentifier(host, port, false, false))
-                {
-                    AuthType = AuthType.Negotiate,
-                    Timeout = TimeSpan.FromSeconds(5)
-                };
-
-                altConn.SessionOptions.ProtocolVersion = 3;
-                if (useSsl)
-                    altConn.SessionOptions.SecureSocketLayer = true;
-
-                altConn.Credential = credential;
-
-                await Task.Run(() => altConn.Bind());
-                tried.Add("Negotiate");
-            }
-            catch (DirectoryOperationException)
-            {
-                // Try NTLM as a last resort
+                // Attempt StartTLS (upgrade) first
                 try
                 {
-                    using var ntlmConn = new LdapConnection(new LdapDirectoryIdentifier(host, port, false, false))
+                    using var startTlsConn = new Novell.Directory.Ldap.LdapConnection();
+                    await Task.Run(() =>
                     {
-                        AuthType = AuthType.Ntlm,
-                        Timeout = TimeSpan.FromSeconds(5)
-                    };
-
-                    ntlmConn.SessionOptions.ProtocolVersion = 3;
-                    if (useSsl)
-                        ntlmConn.SessionOptions.SecureSocketLayer = true;
-
-                    ntlmConn.Credential = credential;
-
-                    await Task.Run(() => ntlmConn.Bind());
-                    tried.Add("NTLM");
+                        startTlsConn.Connect(host, port);
+                        startTlsConn.StartTls();
+                        startTlsConn.Bind(bindUser, creds.Password ?? string.Empty);
+                    });
                 }
-                catch (DirectoryOperationException)
+                catch (Novell.Directory.Ldap.LdapException)
                 {
-                    // all attempts failed — rethrow original to outer catch
-                    throw;
+                    // Fallback to LDAPS on 636
+                    using var sslConn = new Novell.Directory.Ldap.LdapConnection { SecureSocketLayer = true };
+                    await Task.Run(() =>
+                    {
+                        sslConn.Connect(host, 636);
+                        sslConn.Bind(bindUser, creds.Password ?? string.Empty);
+                    });
                 }
             }
+            else
+            {
+                throw;
+            }
+        }
+        finally
+        {
+            try { if (connection.Connected) connection.Disconnect(); } catch { }
         }
 
         // If bind succeeded, authenticated -> generate JWT
