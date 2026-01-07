@@ -64,34 +64,109 @@ app.MapPost("/checkAuth", async (Credentials creds, IConfiguration config) =>
         useSsl = uri.Scheme.Equals("ldaps", StringComparison.OrdinalIgnoreCase);
     }
 
+    // Prefer domain from request; fall back to configured domain if request does not contain it
+    var domainFromRequest = creds.Domain;
+    var domain = !string.IsNullOrWhiteSpace(domainFromRequest) ? domainFromRequest : GetConfigurationValue(config, "DomainController:Domain", app.Environment);
+
+    // Determine credential for bind in a way compatible with Negotiate/Basic
+    // Normalize incoming username into components when possible.
+    var rawUsername = creds.Username ?? string.Empty;
+    NetworkCredential credential;
+
+    if (rawUsername.Contains("\\"))
+    {
+        var parts = rawUsername.Split('\\', 2);
+        var domPart = parts[0];
+        var userPart = parts.Length > 1 ? parts[1] : string.Empty;
+        credential = new NetworkCredential(userPart, creds.Password ?? string.Empty, domPart);
+    }
+    else if (rawUsername.Contains("@"))
+    {
+        // UPN form - supply as username; domain left empty
+        credential = new NetworkCredential(rawUsername, creds.Password ?? string.Empty);
+    }
+    else if (!string.IsNullOrWhiteSpace(domain))
+    {
+        // use provided domain as domain component (NetworkCredential will format correctly for Negotiate)
+        credential = new NetworkCredential(rawUsername, creds.Password ?? string.Empty, domain);
+    }
+    else
+    {
+        credential = new NetworkCredential(rawUsername, creds.Password ?? string.Empty);
+    }
+
     try
     {
         var identifier = new LdapDirectoryIdentifier(host, port, false, false);
-        using var connection = new LdapConnection(identifier)
+        // Try bind with reasonable defaults. Many AD installations require "strong authentication" for simple binds over plaintext;
+        // prefer Negotiate (Kerberos/NTLM) where possible, but allow Basic over LDAPS.
+        try
         {
-            AuthType = AuthType.Basic,
-            Timeout = TimeSpan.FromSeconds(5)
-        };
+            // Primary attempt: use Negotiate for non-SSL, Basic for LDAPS
+            using var connection = new LdapConnection(identifier)
+            {
+                AuthType = useSsl ? AuthType.Basic : AuthType.Negotiate,
+                Timeout = TimeSpan.FromSeconds(5)
+            };
 
-        if (useSsl)
-        {
-            connection.SessionOptions.SecureSocketLayer = true;
+            connection.SessionOptions.ProtocolVersion = 3;
+            if (useSsl)
+                connection.SessionOptions.SecureSocketLayer = true;
+
+            connection.Credential = credential;
+
+            // Perform bind on a background thread (Bind is synchronous)
+            await Task.Run(() => connection.Bind());
         }
-
-        // Prefer domain from request; fall back to configured domain if request does not contain it
-        var domainFromRequest = creds.Domain;
-        var domain = !string.IsNullOrWhiteSpace(domainFromRequest) ? domainFromRequest : GetConfigurationValue(config, "DomainController:Domain", app.Environment);
-
-        var usernameForBind = creds.Username ?? string.Empty;
-        if (!string.IsNullOrWhiteSpace(domain) && !usernameForBind.Contains("\\") && !usernameForBind.Contains("@"))
+        catch (DirectoryOperationException doe) when (doe.Message?.IndexOf("Strong authentication", StringComparison.OrdinalIgnoreCase) >= 0)
         {
-            usernameForBind = domain + "\\" + usernameForBind;
+            // Server requires strong authentication for the attempted method. Try Negotiate explicitly as a fallback,
+            // then NTLM if Negotiate also fails.
+            var tried = new List<string> { useSsl ? "Basic" : "Negotiate" };
+            try
+            {
+                using var altConn = new LdapConnection(new LdapDirectoryIdentifier(host, port, false, false))
+                {
+                    AuthType = AuthType.Negotiate,
+                    Timeout = TimeSpan.FromSeconds(5)
+                };
+
+                altConn.SessionOptions.ProtocolVersion = 3;
+                if (useSsl)
+                    altConn.SessionOptions.SecureSocketLayer = true;
+
+                altConn.Credential = credential;
+
+                await Task.Run(() => altConn.Bind());
+                tried.Add("Negotiate");
+            }
+            catch (DirectoryOperationException)
+            {
+                // Try NTLM as a last resort
+                try
+                {
+                    using var ntlmConn = new LdapConnection(new LdapDirectoryIdentifier(host, port, false, false))
+                    {
+                        AuthType = AuthType.Ntlm,
+                        Timeout = TimeSpan.FromSeconds(5)
+                    };
+
+                    ntlmConn.SessionOptions.ProtocolVersion = 3;
+                    if (useSsl)
+                        ntlmConn.SessionOptions.SecureSocketLayer = true;
+
+                    ntlmConn.Credential = credential;
+
+                    await Task.Run(() => ntlmConn.Bind());
+                    tried.Add("NTLM");
+                }
+                catch (DirectoryOperationException)
+                {
+                    // all attempts failed — rethrow original to outer catch
+                    throw;
+                }
+            }
         }
-
-        var credential = new NetworkCredential(usernameForBind, creds.Password ?? string.Empty);
-
-        // Perform bind on a background thread (Bind is synchronous)
-        await Task.Run(() => connection.Bind(credential));
 
         // If bind succeeded, authenticated -> generate JWT
         var jwtKey = GetConfigurationValue(config, "Jwt:Key", app.Environment);
@@ -110,12 +185,6 @@ app.MapPost("/checkAuth", async (Credentials creds, IConfiguration config) =>
         var securityKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey));
         var signingCreds = new SigningCredentials(securityKey, SecurityAlgorithms.HmacSha256);
 
-        // derive simple username claim (without domain part)
-        var rawUsername = creds.Username ?? string.Empty;
-        if (rawUsername.Contains("\\"))
-            rawUsername = rawUsername.Split('\\', 2)[1];
-        if (rawUsername.Contains("@"))
-            rawUsername = rawUsername.Split('@', 2)[0];
 
         var claims = new List<Claim>
             {
@@ -132,7 +201,7 @@ app.MapPost("/checkAuth", async (Credentials creds, IConfiguration config) =>
             signingCredentials: signingCreds
         );
 
-        token.Payload.Add("sub", usernameForBind);
+        token.Payload.Add("sub", credential.UserName);
         token.Payload.Add("iat", ((DateTimeOffset)DateTime.Now).ToUnixTimeSeconds());
 
         var tokenString = new JwtSecurityTokenHandler().WriteToken(token);
