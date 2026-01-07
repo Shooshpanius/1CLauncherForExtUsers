@@ -19,6 +19,22 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi();
 }
 
+// Helper: when running in Production prefer environment variables for configuration
+static string? GetConfigurationValue(IConfiguration cfg, string key, IHostEnvironment env)
+{
+    if (env.IsProduction())
+    {
+        // Try common env var conventions: colon -> double underscore, or upper with underscore
+        var envKey1 = key.Replace(":", "__");
+        var envKey2 = key.Replace(":", "_").ToUpperInvariant();
+        var v = Environment.GetEnvironmentVariable(envKey1);
+        if (string.IsNullOrEmpty(v)) v = Environment.GetEnvironmentVariable(envKey2);
+        if (!string.IsNullOrEmpty(v)) return v;
+    }
+
+    return cfg[key];
+}
+
 // New endpoint: checkAuth
 // Accepts JSON body: { "username": "...", "password": "...", "domain": "..." }
 // Returns: { "authenticated": true/false, "token": "..." }
@@ -27,7 +43,7 @@ app.MapPost("/checkAuth", async (Credentials creds, IConfiguration config) =>
     if (creds is null)
         return Results.BadRequest(new { error = "missing_credentials" });
 
-    var dcUrl = config["DomainController:Url"];
+    var dcUrl = GetConfigurationValue(config, "DomainController:Url", app.Environment);
     if (string.IsNullOrWhiteSpace(dcUrl))
     {
         return Results.Problem(detail: "Domain controller URL not configured", statusCode: 500);
@@ -64,7 +80,7 @@ app.MapPost("/checkAuth", async (Credentials creds, IConfiguration config) =>
 
         // Prefer domain from request; fall back to configured domain if request does not contain it
         var domainFromRequest = creds.Domain;
-        var domain = !string.IsNullOrWhiteSpace(domainFromRequest) ? domainFromRequest : config["DomainController:Domain"];
+        var domain = !string.IsNullOrWhiteSpace(domainFromRequest) ? domainFromRequest : GetConfigurationValue(config, "DomainController:Domain", app.Environment);
 
         var usernameForBind = creds.Username ?? string.Empty;
         if (!string.IsNullOrWhiteSpace(domain) && !usernameForBind.Contains("\\") && !usernameForBind.Contains("@"))
@@ -78,11 +94,12 @@ app.MapPost("/checkAuth", async (Credentials creds, IConfiguration config) =>
         await Task.Run(() => connection.Bind(credential));
 
         // If bind succeeded, authenticated -> generate JWT
-        var jwtKey = config["Jwt:Key"];
-        var jwtIssuer = config["Jwt:Issuer"];
-        var jwtAudience = config["Jwt:Audience"];
+        var jwtKey = GetConfigurationValue(config, "Jwt:Key", app.Environment);
+        var jwtIssuer = GetConfigurationValue(config, "Jwt:Issuer", app.Environment);
+        var jwtAudience = GetConfigurationValue(config, "Jwt:Audience", app.Environment);
         var expiresMinutes = 60;
-        if (!string.IsNullOrWhiteSpace(config["Jwt:ExpiresMinutes"]) && int.TryParse(config["Jwt:ExpiresMinutes"], out var m))
+        var expiresCfg = GetConfigurationValue(config, "Jwt:ExpiresMinutes", app.Environment);
+        if (!string.IsNullOrWhiteSpace(expiresCfg) && int.TryParse(expiresCfg, out var m))
             expiresMinutes = m;
 
         if (string.IsNullOrWhiteSpace(jwtKey))

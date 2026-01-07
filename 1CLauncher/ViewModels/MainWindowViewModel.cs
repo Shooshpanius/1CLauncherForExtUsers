@@ -428,10 +428,29 @@ namespace _1CLauncher.ViewModels
         {
             try
             {
-                var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-                var path = Path.Combine(appData, "1C", "1CEStart", "ibases.v8i");
+                // Try multiple common locations for ibases.v8i (Windows and Linux)
+                var candidates = new List<string>();
 
-                if (!File.Exists(path))
+                var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+                if (!string.IsNullOrWhiteSpace(appData))
+                {
+                    candidates.Add(Path.Combine(appData, "1C", "1CEStart", "ibases.v8i"));
+                    candidates.Add(Path.Combine(appData, "1cv8", "1CEStart", "ibases.v8i"));
+                }
+
+                var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+                if (!string.IsNullOrWhiteSpace(userProfile))
+                {
+                    candidates.Add(Path.Combine(userProfile, ".1cv8", "1CEStart", "ibases.v8i"));
+                    candidates.Add(Path.Combine(userProfile, ".1cv8", "ibases.v8i"));
+                    candidates.Add(Path.Combine(userProfile, ".config", "1C", "1CEStart", "ibases.v8i"));
+                }
+
+                // additional common linux config path
+                candidates.Add(Path.Combine("/etc", "1C", "ibases.v8i"));
+
+                string? path = candidates.FirstOrDefault(p => !string.IsNullOrWhiteSpace(p) && File.Exists(p));
+                if (string.IsNullOrWhiteSpace(path))
                     return;
 
                 var content = File.ReadAllText(path);
@@ -581,6 +600,106 @@ namespace _1CLauncher.ViewModels
                 Platforms.Clear();
                 _platformPaths.Clear();
 
+                if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                {
+                    // Linux / Unix detection
+                    var exeNames = new[] { "1cv8", "1cv8c", "ragent" };
+                    var candidates = new List<string>();
+
+                    // check common bin paths
+                    var binDirs = new[] { "/usr/bin", "/usr/local/bin", "/opt/1cv8", "/opt/1C", "/opt/1C/v8.3", "/opt" };
+                    foreach (var dir in binDirs)
+                    {
+                        try
+                        {
+                            if (!Directory.Exists(dir)) continue;
+
+                            foreach (var name in exeNames)
+                            {
+                                try
+                                {
+                                    foreach (var f in Directory.EnumerateFiles(dir, name, SearchOption.AllDirectories))
+                                    {
+                                        if (File.Exists(f) && !candidates.Contains(f, StringComparer.OrdinalIgnoreCase))
+                                            candidates.Add(f);
+                                    }
+                                }
+                                catch { }
+                            }
+                        }
+                        catch { }
+                    }
+
+                    // also check PATH
+                    var pathEnv = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
+                    foreach (var p in pathEnv.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
+                    {
+                        try
+                        {
+                            foreach (var name in exeNames)
+                            {
+                                var full = Path.Combine(p, name);
+                                if (File.Exists(full) && !candidates.Contains(full, StringComparer.OrdinalIgnoreCase))
+                                    candidates.Add(full);
+                            }
+                        }
+                        catch { }
+                    }
+
+                    // consider /opt directories for versioned installs: /opt/1cv8/<version>/bin/1cv8
+                    try
+                    {
+                        var opt = "/opt";
+                        if (Directory.Exists(opt))
+                        {
+                            foreach (var sub in Directory.EnumerateDirectories(opt))
+                            {
+                                try
+                                {
+                                    foreach (var name in exeNames)
+                                    {
+                                        try
+                                        {
+                                            foreach (var f in Directory.EnumerateFiles(sub, name, SearchOption.AllDirectories))
+                                            {
+                                                if (File.Exists(f) && !candidates.Contains(f, StringComparer.OrdinalIgnoreCase))
+                                                    candidates.Add(f);
+                                            }
+                                        }
+                                        catch { }
+                                    }
+                                }
+                                catch { }
+                            }
+                        }
+                    }
+                    catch { }
+
+                    foreach (var exe in candidates.Distinct(StringComparer.OrdinalIgnoreCase))
+                    {
+                        try
+                        {
+                            var folder = Path.GetFileName(Path.GetDirectoryName(exe) ?? string.Empty);
+                            var display = (string.IsNullOrWhiteSpace(folder) ? Path.GetFileName(exe) : folder) + " (linux)";
+                            if (!Platforms.Contains(display))
+                            {
+                                Platforms.Add(display);
+                                _platformPaths[display] = exe;
+                            }
+                        }
+                        catch { }
+                    }
+
+                    if (Platforms.Count > 0)
+                    {
+                        if (string.IsNullOrWhiteSpace(SelectedPlatform) || !Platforms.Contains(SelectedPlatform))
+                            SelectedPlatform = Platforms[0];
+                    }
+
+                    return;
+                }
+
+                // Windows detection (existing logic)
                 var pf64 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
                 var pf86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
                 var roots = new[] { pf64, pf86 }.Where(p => !string.IsNullOrWhiteSpace(p)).Distinct();
