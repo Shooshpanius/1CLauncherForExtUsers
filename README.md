@@ -23,6 +23,7 @@
 	- параметр ExternalUrl в `~/.config/1CLauncher/settings.json`
 
 Конфиг для композера DCAuth:
+```
   dcauth:
     container_name: dcauth
     image: shooshpanius/dcauth:latest
@@ -35,6 +36,7 @@
       JWT_ISSUER: 
       JWT_AUDIENCE: 
       JWT_EXPIRESMINUTES: 60
+```
 
 Запуск со сборкой:
 1. Откройте терминал в корне репозитория.
